@@ -1,0 +1,10 @@
+[package]
+name = "apro-contracts"
+description = "Payload contracts shared between APRO product apps: the artifact types they publish and the unit conversions at the boundary."
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

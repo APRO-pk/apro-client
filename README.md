@@ -15,6 +15,56 @@ That is the only dependency an app needs. The store itself (SQLite, the HTTP
 service, the hub) is not linked in — `apro-client` carries only the wire types
 and one small blocking HTTP transport.
 
+Payloads that two apps exchange are described in a companion crate:
+
+```toml
+apro-contracts = { git = "https://github.com/APRO-pk/apro-client", tag = "v0.2.0" }
+```
+
+---
+
+## Payload contracts
+
+The hub never parses a payload, so it cannot catch a unit error. `apro-contracts`
+is where the apps that *do* exchange data agree on what the bytes mean — and, more
+importantly, where the conversions live.
+
+| Crate | Purpose |
+| --- | --- |
+| `apro-types` | Platform vocabulary: artifact ids, revisions, edges, modes |
+| `apro-contracts` | Payload shapes two apps agree on, plus the unit/datum conversions |
+| `apro-client` | The transport and the launch handshake |
+
+`apro-contracts` depends on nothing but `serde`. Each app maps its own types in
+and out, so it never needs a CAD kernel or a flight-dynamics model to take part.
+
+### Units are the whole problem
+
+aproCAD works in millimetres. HexaDOF is SI. Mass is already kilograms on both
+sides, so a spot-check of the mass looks fine while the inertia is wrong by a
+factor of **one million** — which produces flight dynamics that are merely
+sluggish, not obviously broken.
+
+| quantity | factor (mm → m) |
+| --- | --- |
+| mass | 1 |
+| centre of gravity | 1000 |
+| inertia | **1e6** |
+| volume | 1e9 |
+
+So the payload declares its units, and `validate()` refuses anything that is not
+`SI` rather than guessing.
+
+### The datum is declared, never inferred
+
+A CAD origin is wherever the author put it; a body datum is usually the nose tip,
+the base, or the CG. Nothing in either model can tell you which. The payload
+therefore carries `datum_offset_m` — where the CAD origin sits in the body-datum
+frame, so `p_body = p_cad + datum_offset_m`. Use
+`center_of_gravity_in_datum()` rather than doing the shift yourself; it is
+implemented and tested once, including the part that is easy to get wrong:
+inertia is *unchanged*, because it is about the CG, not the origin.
+
 ---
 
 ## The mental model

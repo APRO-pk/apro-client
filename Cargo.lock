@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "apro-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "apro-types",
  "dirs",
@@ -16,8 +16,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "apro-contracts"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "apro-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "thiserror",
