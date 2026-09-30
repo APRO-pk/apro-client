@@ -183,6 +183,13 @@ pub struct MassPropertiesV1 {
     pub datum_offset_m: [f64; 3],
     /// Original document units, kept for provenance.
     pub source_units: SourceUnits,
+    /// Reference geometry, when the producer could derive it.
+    ///
+    /// Optional because not every producer knows its body's aerodynamic conventions, and
+    /// inventing a number would be worse than admitting the gap. A consumer that finds
+    /// `None` must ask the user rather than falling back to a default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_geometry: Option<ReferenceGeometrySi>,
     /// A human-readable note about how the numbers were produced and converted.
     pub source_note: String,
 }
@@ -215,6 +222,7 @@ impl MassPropertiesV1 {
             volume_m3: native.volume * volume,
             datum_offset_m,
             source_units: source,
+            reference_geometry: None,
             source_note: format!(
                 "converted from {} at the publish boundary \
                  (cg ÷{:.0}, inertia ÷{:.0}); mass needed no conversion because CAD \
@@ -225,6 +233,16 @@ impl MassPropertiesV1 {
                 source.as_str()
             ),
         }
+    }
+
+    /// Attach the reference geometry this body should be flown with.
+    ///
+    /// A builder rather than a constructor argument: a producer that cannot state its
+    /// aerodynamic convention should leave it unset, and the type makes that the default
+    /// instead of something you have to remember to pass `None` for.
+    pub fn with_reference_geometry(mut self, reference: ReferenceGeometrySi) -> Self {
+        self.reference_geometry = Some(reference);
+        self
     }
 
     /// The centre of gravity expressed in the consumer's body datum frame.
@@ -318,18 +336,29 @@ impl MassPropertiesV1 {
     }
 }
 
-/// Reference geometry a consumer needs but a CAD model does not determine.
+/// Reference geometry a consumer needs but a CAD document does not determine.
 ///
 /// Aerodynamic reference area is a **convention**, not a derivation: a rocket's is usually
 /// the body cross-section, but a winged vehicle's may be the planform, and a multi-stage
-/// stack's may be the first-stage diameter. Nothing in the CAD document says which, so v1
-/// has the consumer supply it rather than the producer invent it.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// stack's may be the first-stage diameter. Nothing in the CAD document says which, so the
+/// producer states the convention it used in [`Self::convention`] rather than leaving the
+/// consumer to guess — and a consumer that does not trust the stated convention can ask
+/// the user instead of silently accepting a number.
+///
+/// It travels inside [`MassPropertiesV1`] rather than as a second artifact on purpose: the
+/// two describe one body, and separate artifacts could be read at mismatched revisions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReferenceGeometrySi {
-    /// Aerodynamic reference area, `m²`. A convention, not a derivation.
+    /// Aerodynamic reference area, `m²`.
     pub reference_area_m2: f64,
+    /// Reference length, `m`. Conventionally the body length.
     pub reference_length_m: f64,
+    /// Maximum body diameter, `m`.
     pub body_diameter_m: f64,
+    /// How these numbers were chosen, in the producer's words. Free text, but required:
+    /// a bare number with no stated convention is exactly what this field exists to stop.
+    #[serde(default)]
+    pub convention: String,
 }
 
 impl ReferenceGeometrySi {
@@ -340,6 +369,40 @@ impl ReferenceGeometrySi {
             reference_area_m2: std::f64::consts::PI * radius * radius,
             reference_length_m: length_m,
             body_diameter_m: diameter_m,
+            convention: "reference area is the area of a circle of the body diameter".to_string(),
+        }
+    }
+
+    /// Derive reference geometry from an axis-aligned bounding box, in metres.
+    ///
+    /// `longitudinal` is the index (0 = x, 1 = y, 2 = z) of the body's long axis. The
+    /// convention this applies — and records — is:
+    ///
+    /// * reference **length** is the bounding-box extent along the long axis;
+    /// * body **diameter** is the *smaller* of the two transverse extents, so an
+    ///   asymmetric body is not credited with a wider reference area than it has;
+    /// * reference **area** is a circle of that diameter.
+    ///
+    /// This is a stated choice, not a law. A vehicle whose real reference area is a
+    /// planform must override it, which is why the convention travels with the numbers.
+    pub fn from_bounding_box(extent_m: [f64; 3], longitudinal: usize) -> Self {
+        let transverse: Vec<f64> = (0..3)
+            .filter(|axis| *axis != longitudinal)
+            .map(|axis| extent_m[axis].abs())
+            .collect();
+        let diameter = transverse.iter().copied().fold(f64::INFINITY, f64::min);
+        let length = extent_m[longitudinal].abs();
+        let radius = diameter / 2.0;
+
+        Self {
+            reference_area_m2: std::f64::consts::PI * radius * radius,
+            reference_length_m: length,
+            body_diameter_m: diameter,
+            convention: format!(
+                "derived from the assembly bounding box: reference length is the extent \
+                 along axis {longitudinal}, body diameter is the smaller of the two \
+                 transverse extents, and reference area is a circle of that diameter"
+            ),
         }
     }
 
@@ -361,6 +424,11 @@ impl ReferenceGeometrySi {
         if self.reference_length_m <= 0.0 {
             return Err(ContractError::InvalidReferenceGeometry {
                 reason: "reference_length_m must be positive".into(),
+            });
+        }
+        if self.body_diameter_m <= 0.0 {
+            return Err(ContractError::InvalidReferenceGeometry {
+                reason: "body_diameter_m must be positive".into(),
             });
         }
         Ok(())
@@ -659,6 +727,7 @@ mod tests {
         // pi * 0.05^2 = 0.007853981...
         assert!((reference.reference_area_m2 - 0.007_853_981_633_974_483).abs() < 1e-15);
         assert_eq!(reference.body_diameter_m, 0.1);
+        assert!(!reference.convention.is_empty());
         reference.validate().unwrap();
     }
 
@@ -668,7 +737,57 @@ mod tests {
             reference_area_m2: 0.0,
             reference_length_m: 0.6,
             body_diameter_m: 0.1,
+            convention: "test".into(),
         };
         assert!(reference.validate().is_err());
+    }
+
+    /// The bounding-box derivation is a stated convention, so hold it to the one it
+    /// states: length along the long axis, diameter from the *smaller* transverse extent.
+    #[test]
+    fn reference_geometry_from_a_bounding_box_uses_the_smaller_transverse_extent() {
+        // 0.2 x 0.15 x 0.6 m, long axis Z.
+        let reference = ReferenceGeometrySi::from_bounding_box([0.2, 0.15, 0.6], 2);
+        assert!((reference.reference_length_m - 0.6).abs() < 1e-15);
+        // The smaller transverse extent is 0.15, not 0.2. An asymmetric body must not be
+        // credited with a wider reference area than it has.
+        assert!((reference.body_diameter_m - 0.15).abs() < 1e-15);
+        let expected_area = std::f64::consts::PI * 0.075 * 0.075;
+        assert!((reference.reference_area_m2 - expected_area).abs() < 1e-15);
+        assert!(reference.convention.contains("axis 2"));
+        reference.validate().unwrap();
+    }
+
+    #[test]
+    fn reference_geometry_travels_inside_the_payload() {
+        let (native, _) = block(600.0);
+        let reference = ReferenceGeometrySi::from_body_diameter(0.1, 0.6);
+        let payload = MassPropertiesV1::from_document(native, SourceUnits::Millimeters, [0.0; 3])
+            .with_reference_geometry(reference.clone());
+
+        assert_eq!(payload.reference_geometry.as_ref(), Some(&reference));
+
+        let text = payload.to_json().unwrap();
+        let back = MassPropertiesV1::from_json_checked(&text).unwrap();
+        assert_eq!(back.reference_geometry, Some(reference));
+    }
+
+    /// A payload from a producer that cannot state its aerodynamic convention must still
+    /// parse, and must say `None` rather than inventing a number.
+    #[test]
+    fn reference_geometry_is_optional_and_absent_by_default() {
+        let (native, _) = block(600.0);
+        let payload = MassPropertiesV1::from_document(native, SourceUnits::Millimeters, [0.0; 3]);
+        assert!(payload.reference_geometry.is_none());
+
+        let text = payload.to_json().unwrap();
+        assert!(
+            !text.contains("reference_geometry"),
+            "an unset field should not be serialised: {text}"
+        );
+        assert!(MassPropertiesV1::from_json_checked(&text)
+            .unwrap()
+            .reference_geometry
+            .is_none());
     }
 }
