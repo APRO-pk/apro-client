@@ -677,6 +677,9 @@ pub struct SubscriptionSummary {
     pub subscription_id: String,
     pub consumer_app: String,
     pub type_id: String,
+    /// `None` means every instance of the type; `Some(name)` pins the wire to one.
+    #[serde(default)]
+    pub instance: Option<String>,
     pub mode: Mode,
     /// How many concrete edges this subscription currently materialises to.
     pub edge_count: u32,
@@ -690,6 +693,10 @@ pub struct SubscriptionSummary {
 pub struct SubscriptionRequest {
     pub consumer_app: String,
     pub type_id: TypeId,
+    /// Pin the wire to one published instance. Omit to follow every instance of the
+    /// type, which is what a canvas wire means when the user has not chosen one.
+    #[serde(default)]
+    pub instance: Option<String>,
     #[serde(default = "default_mode_pinned")]
     pub mode: Mode,
     #[serde(default)]
