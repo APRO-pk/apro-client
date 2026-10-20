@@ -89,9 +89,9 @@ anywhere. Consumers pull.
 whole platform. Dots are rejected.
 
 ```
-apro-cad/mass-properties
-apro-cad/reference-geometry
-hexadof/model-file
+apro-cad/mass-properties-si-v1
+apro-cad/reference-geometry-si-v1
+hexadof/model-file-v1
 propulsor/thrust-curve
 ```
 
@@ -105,27 +105,66 @@ An app must declare an **interface** before anything it writes will be accepted.
 Writes to undeclared types fail with `write_not_declared` — this is the guard
 that stops two apps quietly colliding on the same `type_id`.
 
+Declare **once at startup**, not on your first publish: the hub draws your block
+in the workflow canvas from this declaration, so an app that only declares when
+it has something to push has no sockets until somebody finds a use for it.
+
+The declaration is your app's **Node Library** — every element you could expose,
+described well enough for a person to pick between them.
+
 ```rust
-use apro_client::{AppInterface, ConsumeDecl, Mode, TypeId};
+use apro_client::{AppInterface, ConsumeDecl, Mode, PublishDecl, Status, TypeId};
+
+let mass = TypeId::parse("apro-cad/mass-properties-si-v1")?;
+let mesh = TypeId::parse("apro-cad/mesh-stl-v1")?;
 
 let interface = AppInterface {
     app: "apro-cad".into(),
-    publishes: vec![TypeId::parse("apro-cad/mass-properties")?],
-    consumes: vec![ConsumeDecl {
-        type_id: TypeId::parse("hexadof/model-file")?,
-        default_mode: Mode::Pinned,
-    }],
+    publishes: vec![
+        PublishDecl::from(mass)
+            .with_label("Mass properties")
+            .with_description("Volume, mass, centre of mass and inertia.")
+            .with_order(10),
+        // Catalogued and selectable, but not built yet.
+        PublishDecl::from(mesh)
+            .with_label("STL mesh")
+            .with_description("The model as a triangle mesh.")
+            .with_status(Status::Planned)
+            .disabled_by_default()
+            .with_order(30),
+    ],
+    consumes: vec![ConsumeDecl::from(TypeId::parse("burn-geometry-modeler/grain-geometry-v1")?)
+        .with_mode(Mode::Pinned)
+        .with_label("Grain geometry")],
 };
 
 client.declare_interface(&interface)?;
 ```
+
+`PublishDecl::from(type_id)` and `ConsumeDecl::from(type_id)` are enough if you
+have nothing more to say — the defaults are `Encoding::Json`, `Status::Live`,
+enabled by default and order 0. The pre-0.4.0 array-of-type-ids form is still
+accepted.
+
+**Mark it `Status::Planned` if you cannot push it yet.** The hub draws a planned
+element as a dimmed, hollow port that cannot be wired, which is honest. Claiming
+`Live` for something nothing pushes draws a socket the graph can never satisfy,
+and the resulting staleness reads as your app being broken.
+
+Two rules worth knowing:
+
+- **Redeclaring replaces your whole catalogue.** Removing an element is how you
+  withdraw it. Declaring the same element twice in one direction is rejected.
+- **Type ids are versioned.** Anything carrying a schema ends in `-vN`
+  (`grain-geometry-v1`); the version *is* the contract. A type id without `-vN`
+  is a name, not a contract.
 
 ### 2. Publish
 
 ```rust
 use apro_client::Encoding;
 
-let type_id = TypeId::parse("apro-cad/mass-properties")?;
+let type_id = TypeId::parse("apro-cad/mass-properties-si-v1")?;
 
 client.push(
     &type_id,
@@ -148,7 +187,7 @@ opaque bytes; the choice is a contract between you and the consumer.
 ```rust
 use apro_client::Selector;
 
-let type_id = TypeId::parse("apro-cad/mass-properties")?;
+let type_id = TypeId::parse("apro-cad/mass-properties-si-v1")?;
 
 let Some(payload) = client.pull(&type_id, "satellite-a", Selector::Latest)? else {
     // The producer has not published yet. This is normal, not an error.
@@ -170,7 +209,7 @@ use apro_client::EdgeRequest;
 client.register_edge(&EdgeRequest {
     consumer_app: String::new(),   // overwritten from your session
     consumer_ref: None,
-    type_id: TypeId::parse("apro-cad/mass-properties")?,
+    type_id: TypeId::parse("apro-cad/mass-properties-si-v1")?,
     instance: "satellite-a".into(),
     mode: Mode::Pinned,
     pinned_revision_number: Some(3),
@@ -230,8 +269,8 @@ loop {
     for event in client.events(cursor)? {
         cursor = event.seq;             // monotonically increasing, never replays
 
-        if event.type_id.as_deref() == Some("apro-cad/mass-properties") {
-            let type_id = TypeId::parse("apro-cad/mass-properties")?;
+        if event.type_id.as_deref() == Some("apro-cad/mass-properties-si-v1") {
+            let type_id = TypeId::parse("apro-cad/mass-properties-si-v1")?;
             let payload = client.pull(&type_id, "satellite-a", Selector::Latest)?;
             // recompute, or simply mark your current result stale
         }

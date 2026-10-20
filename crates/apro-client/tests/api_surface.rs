@@ -8,26 +8,54 @@
 
 use apro_client::{
     AppInterface, ClientConfig, ConsumeDecl, EdgeRequest, Encoding, HttpStoreClient, Mode,
-    Selector, TypeId,
+    PublishDecl, Selector, Status, TypeId,
 };
 
 #[test]
 fn declaring_an_interface_matches_the_readme() {
     let interface = AppInterface {
         app: "apro-cad".into(),
-        publishes: vec![TypeId::parse("apro-cad/mass-properties").unwrap()],
-        consumes: vec![ConsumeDecl {
-            type_id: TypeId::parse("hexadof/model-file").unwrap(),
-            default_mode: Mode::Pinned,
-        }],
+        publishes: vec![
+            PublishDecl::from(TypeId::parse("apro-cad/mass-properties-si-v1").unwrap())
+                .with_label("Mass properties")
+                .with_description("Volume, mass, centre of mass and inertia.")
+                .with_order(10),
+            PublishDecl::from(TypeId::parse("apro-cad/mesh-stl-v1").unwrap())
+                .with_label("STL mesh")
+                .with_status(Status::Planned)
+                .disabled_by_default()
+                .with_order(30),
+        ],
+        consumes: vec![ConsumeDecl::from(
+            TypeId::parse("burn-geometry-modeler/grain-geometry-v1").unwrap(),
+        )
+        .with_mode(Mode::Pinned)
+        .with_label("Grain geometry")],
     };
 
     assert_eq!(interface.app, "apro-cad");
     assert_eq!(
-        interface.publishes[0].to_string(),
-        "apro-cad/mass-properties"
+        interface.publishes[0].type_id.as_str(),
+        "apro-cad/mass-properties-si-v1"
+    );
+    assert_eq!(
+        interface.publishes[0].label.as_deref(),
+        Some("Mass properties")
     );
     assert_eq!(interface.consumes[0].default_mode, Mode::Pinned);
+
+    // The defaults the README promises: live, enabled, JSON, order 0 unless said otherwise.
+    assert_eq!(interface.publishes[0].status, Status::Live);
+    assert!(interface.publishes[0].default_enabled);
+    assert_eq!(interface.publishes[0].encoding, Encoding::Json);
+    assert_eq!(interface.publishes[0].item_order, 10);
+
+    // A planned element is catalogued but not claimed.
+    assert_eq!(interface.publishes[1].status, Status::Planned);
+    assert!(!interface.publishes[1].default_enabled);
+
+    assert_eq!(interface.live_publishes().len(), 1);
+    assert_eq!(interface.publishes.len(), 2);
 }
 
 #[test]

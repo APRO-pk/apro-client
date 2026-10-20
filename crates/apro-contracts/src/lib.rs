@@ -58,6 +58,22 @@ use serde::{Deserialize, Serialize};
 /// (`a-z`, `0-9`, `-`), so a dot is rejected as an invalid type id.
 pub const MASS_PROPERTIES_TYPE: &str = "apro-cad/mass-properties-si-v1";
 
+/// Published artifact type for aerodynamic reference geometry.
+///
+/// This is a **separate artifact** from [`MASS_PROPERTIES_TYPE`]. It used to ride inside
+/// the mass-properties payload, which kept the two perfectly in step but meant a producer
+/// could not publish reference geometry without also claiming a mass model, and a consumer
+/// that only wanted the reference numbers had to fetch and parse the whole mass payload.
+///
+/// The cost of splitting is real and must be handled by producers: two artifacts are two
+/// revisions, so a producer that derives both from one document must publish them together
+/// (see aproCAD's `publish`) and a consumer must tolerate reading them at different
+/// revision numbers. Carry [`SI_MARKER`] in `units` exactly as the mass payload does.
+pub const REFERENCE_GEOMETRY_TYPE: &str = "apro-cad/reference-geometry-si-v1";
+
+/// Every payload of [`REFERENCE_GEOMETRY_TYPE`] carries this in `schema`.
+pub const REFERENCE_GEOMETRY_SCHEMA_VERSION: u32 = 1;
+
 /// The marker every payload of [`MASS_PROPERTIES_TYPE`] must carry.
 pub const SI_MARKER: &str = "SI";
 
@@ -345,8 +361,11 @@ impl MassPropertiesV1 {
 /// consumer to guess — and a consumer that does not trust the stated convention can ask
 /// the user instead of silently accepting a number.
 ///
-/// It travels inside [`MassPropertiesV1`] rather than as a second artifact on purpose: the
-/// two describe one body, and separate artifacts could be read at mismatched revisions.
+/// It is published as its own artifact ([`REFERENCE_GEOMETRY_TYPE`]) rather than inside
+/// [`MassPropertiesV1`]. [`MassPropertiesV1::reference_geometry`] still exists so payloads
+/// written before the split keep parsing, and so a producer that has no separate publish
+/// path can still state its convention — but a payload carrying both is redundant and
+/// readers that know the split should prefer the dedicated artifact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReferenceGeometrySi {
     /// Aerodynamic reference area, `m²`.
@@ -432,6 +451,80 @@ impl ReferenceGeometrySi {
             });
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The published reference-geometry payload
+// ---------------------------------------------------------------------------
+
+/// SI aerodynamic reference geometry, as published to the platform under
+/// [`REFERENCE_GEOMETRY_TYPE`].
+///
+/// This carries the same numbers as [`ReferenceGeometrySi`] plus the provenance a
+/// standalone artifact needs to be trustworthy on its own: the marker that proves it is
+/// SI, the document units it was authored in, and a note describing how it was derived.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceGeometryV1 {
+    /// Always [`REFERENCE_GEOMETRY_TYPE`].
+    pub schema: String,
+    /// Always [`SI_MARKER`].
+    pub units: String,
+    pub reference_area_m2: f64,
+    pub reference_length_m: f64,
+    pub body_diameter_m: f64,
+    /// How these numbers were chosen, in the producer's words.
+    pub convention: String,
+    /// Original document units, kept for provenance.
+    pub source_units: SourceUnits,
+    pub source_note: String,
+}
+
+impl ReferenceGeometryV1 {
+    /// Wrap the geometry a producer derived, adding schema and provenance.
+    pub fn new(reference: ReferenceGeometrySi, source: SourceUnits) -> Self {
+        Self {
+            schema: REFERENCE_GEOMETRY_TYPE.to_string(),
+            units: SI_MARKER.to_string(),
+            reference_area_m2: reference.reference_area_m2,
+            reference_length_m: reference.reference_length_m,
+            body_diameter_m: reference.body_diameter_m,
+            convention: reference.convention.clone(),
+            source_units: source,
+            source_note: format!(
+                "derived from a document authored in {} and converted to metres at the \
+                 publish boundary; {}",
+                source.as_str(),
+                reference.convention
+            ),
+        }
+    }
+
+    /// Reframe the payload as the plain geometry type, dropping provenance.
+    pub fn geometry(&self) -> ReferenceGeometrySi {
+        ReferenceGeometrySi {
+            reference_area_m2: self.reference_area_m2,
+            reference_length_m: self.reference_length_m,
+            body_diameter_m: self.body_diameter_m,
+            convention: self.convention.clone(),
+        }
+    }
+
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    pub fn from_json(text: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(text)
+    }
+
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.units != SI_MARKER {
+            return Err(ContractError::NotSi {
+                units: self.units.clone(),
+            });
+        }
+        self.geometry().validate()
     }
 }
 

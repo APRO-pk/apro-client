@@ -53,9 +53,10 @@ use serde::{Deserialize, Serialize};
 /// `Payload`, `HealthInfo` and `Result` are defined in this crate rather than in
 /// `apro-types`, so they are not listed here.
 pub use apro_types::{
-    AccessRecord, AppInterface, ArtifactFilter, ArtifactSummary, ConsumeDecl, EdgeFilter,
-    EdgeRequest, EdgeSummary, Encoding, EventRecord, Mode, RevisionHandle, RevisionSummary,
-    Selector, StoreStats, SubscriptionRequest, SubscriptionSummary, TypeError, TypeId,
+    AccessRecord, AppInterface, ArtifactFilter, ArtifactSummary, ConsumeDecl, DeclaredType,
+    EdgeFilter, EdgeRequest, EdgeSummary, Encoding, EventRecord, Mode, PublishDecl,
+    RevisionHandle, RevisionSummary, Selector, Status, StoreStats, SubscriptionRequest,
+    SubscriptionSummary, TypeError, TypeId,
 };
 
 /// The whole vocabulary, for callers that prefer to qualify it (`apro_types::Foo`).

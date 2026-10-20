@@ -314,21 +314,274 @@ fn default_mode_pinned() -> Mode {
     Mode::Pinned
 }
 
+fn default_encoding_json() -> Encoding {
+    Encoding::Json
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+/// Whether a declared element is operational yet, or only planned.
+///
+/// The Node Library shows both so an app can advertise its full intended surface,
+/// but the canvas must not let a wire be drawn onto a `planned` element — nothing
+/// would ever be written to it. `Status::Live` is the default so a declaration that
+/// says nothing about status is treated as real.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    Live,
+    Planned,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Status::Live
+    }
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Live => "live",
+            Status::Planned => "planned",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "live" | "ready" | "enabled" => Ok(Status::Live),
+            "planned" | "pending" | "todo" => Ok(Status::Planned),
+            other => Err(TypeError::invalid(format!(
+                "unknown status {other:?}; expected one of live, planned"
+            ))),
+        }
+    }
+
+    pub fn is_live(self) -> bool {
+        matches!(self, Status::Live)
+    }
+}
+
+impl fmt::Display for Status {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One element an app publishes, as it should appear in the Node Library.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishDecl {
+    pub type_id: TypeId,
+    /// Human label for the port. Falls back to the type name when absent.
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_encoding_json")]
+    pub encoding: Encoding,
+    #[serde(default)]
+    pub status: Status,
+    /// Whether a freshly added block starts with this port ticked.
+    #[serde(default = "default_enabled")]
+    pub default_enabled: bool,
+    /// Curation order inside the Node Library; lower sorts first.
+    #[serde(default)]
+    pub item_order: i32,
+}
+
+impl PublishDecl {
+    pub fn new(type_id: TypeId) -> Self {
+        Self::from(type_id)
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn with_encoding(mut self, encoding: Encoding) -> Self {
+        self.encoding = encoding;
+        self
+    }
+
+    pub fn with_status(mut self, status: Status) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// Advertise the element without claiming it works yet.
+    pub fn planned(mut self) -> Self {
+        self.status = Status::Planned;
+        self.default_enabled = false;
+        self
+    }
+
+    pub fn disabled_by_default(mut self) -> Self {
+        self.default_enabled = false;
+        self
+    }
+
+    pub fn with_order(mut self, item_order: i32) -> Self {
+        self.item_order = item_order;
+        self
+    }
+}
+
+impl From<TypeId> for PublishDecl {
+    fn from(type_id: TypeId) -> Self {
+        Self {
+            type_id,
+            label: None,
+            description: None,
+            encoding: Encoding::Json,
+            status: Status::Live,
+            default_enabled: true,
+            item_order: 0,
+        }
+    }
+}
+
+/// One element an app consumes, as it should appear in the Node Library.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsumeDecl {
     pub type_id: TypeId,
     #[serde(default = "default_mode_pinned")]
     pub default_mode: Mode,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Encoding the app expects to read. Metadata only; the hub stores bytes verbatim.
+    #[serde(default = "default_encoding_json")]
+    pub encoding: Encoding,
+    #[serde(default)]
+    pub status: Status,
+    #[serde(default = "default_enabled")]
+    pub default_enabled: bool,
+    #[serde(default)]
+    pub item_order: i32,
+}
+
+impl ConsumeDecl {
+    pub fn new(type_id: TypeId) -> Self {
+        Self::from(type_id)
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn with_mode(mut self, mode: Mode) -> Self {
+        self.default_mode = mode;
+        self
+    }
+
+    pub fn with_encoding(mut self, encoding: Encoding) -> Self {
+        self.encoding = encoding;
+        self
+    }
+
+    pub fn with_status(mut self, status: Status) -> Self {
+        self.status = status;
+        self
+    }
+
+    pub fn planned(mut self) -> Self {
+        self.status = Status::Planned;
+        self.default_enabled = false;
+        self
+    }
+
+    pub fn disabled_by_default(mut self) -> Self {
+        self.default_enabled = false;
+        self
+    }
+
+    pub fn with_order(mut self, item_order: i32) -> Self {
+        self.item_order = item_order;
+        self
+    }
+}
+
+impl From<TypeId> for ConsumeDecl {
+    fn from(type_id: TypeId) -> Self {
+        Self {
+            type_id,
+            default_mode: Mode::Pinned,
+            label: None,
+            description: None,
+            encoding: Encoding::Json,
+            status: Status::Live,
+            default_enabled: true,
+            item_order: 0,
+        }
+    }
 }
 
 /// An app's declared data contract (DESIGN.md D16).
+///
+/// This is also the app's **Node Library**: the full catalogue of elements it can
+/// expose, including ones it has not implemented yet (`Status::Planned`). The
+/// declaration is authoritative and replaces the app's previous one wholesale, so an
+/// element the app stops listing disappears from the library.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppInterface {
     pub app: String,
     #[serde(default)]
-    pub publishes: Vec<TypeId>,
+    pub publishes: Vec<PublishDecl>,
     #[serde(default)]
     pub consumes: Vec<ConsumeDecl>,
+}
+
+impl AppInterface {
+    pub fn new(app: impl Into<String>) -> Self {
+        Self {
+            app: app.into(),
+            publishes: Vec::new(),
+            consumes: Vec::new(),
+        }
+    }
+
+    pub fn publishing(mut self, decl: impl Into<PublishDecl>) -> Self {
+        self.publishes.push(decl.into());
+        self
+    }
+
+    pub fn consuming(mut self, decl: impl Into<ConsumeDecl>) -> Self {
+        self.consumes.push(decl.into());
+        self
+    }
+
+    /// Type ids this app currently publishes for real (live only).
+    pub fn live_publishes(&self) -> Vec<&TypeId> {
+        self.publishes
+            .iter()
+            .filter(|p| p.status.is_live())
+            .map(|p| &p.type_id)
+            .collect()
+    }
+
+    /// Type ids this app currently consumes for real (live only).
+    pub fn live_consumes(&self) -> Vec<&TypeId> {
+        self.consumes
+            .iter()
+            .filter(|c| c.status.is_live())
+            .map(|c| &c.type_id)
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +776,32 @@ pub struct DeclaredType {
     pub default_mode: Option<String>,
     pub source: String,
     pub declared_at: Millis,
+    /// Node Library metadata. All optional so rows declared by an older client, and
+    /// readers built before the library existed, keep working.
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub encoding: Option<String>,
+    /// `"live"` or `"planned"`.
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub default_enabled: Option<bool>,
+    #[serde(default)]
+    pub item_order: Option<i32>,
+}
+
+impl DeclaredType {
+    /// True unless the app explicitly marked the element as planned.
+    pub fn is_live(&self) -> bool {
+        !matches!(self.status.as_deref(), Some("planned"))
+    }
+
+    pub fn is_enabled_by_default(&self) -> bool {
+        self.default_enabled.unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
