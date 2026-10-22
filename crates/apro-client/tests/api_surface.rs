@@ -7,8 +7,8 @@
 //! Nothing here talks to a store. It is a shape check, not an integration test.
 
 use apro_client::{
-    AppInterface, ClientConfig, ConsumeDecl, EdgeRequest, Encoding, HttpStoreClient, Mode,
-    PublishDecl, Selector, Status, TypeId,
+    AppInterface, ClientConfig, CommandCost, CommandDecl, CommandKind, CommandOutcome, ConsumeDecl,
+    EdgeRequest, Encoding, HttpStoreClient, Mode, PublishDecl, Selector, Status, TypeId,
 };
 
 #[test]
@@ -31,6 +31,23 @@ fn declaring_an_interface_matches_the_readme() {
         )
         .with_mode(Mode::Pinned)
         .with_label("Grain geometry")],
+        commands: vec![
+            CommandDecl::new("get-state", "Read the vehicle document as it stands"),
+            CommandDecl::new(
+                "set-parameter",
+                "Set one vehicle parameter by name, for example dry-mass",
+            )
+            .writing()
+            .with_params(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "value": { "type": "number" }
+                },
+                "required": ["name", "value"],
+                "additionalProperties": false
+            })),
+        ],
     };
 
     assert_eq!(interface.app, "apro-cad");
@@ -56,6 +73,39 @@ fn declaring_an_interface_matches_the_readme() {
 
     assert_eq!(interface.live_publishes().len(), 1);
     assert_eq!(interface.publishes.len(), 2);
+
+    // Commands are a separate namespace with their own defaults.
+    assert_eq!(interface.commands.len(), 2);
+    assert_eq!(interface.commands[0].kind, CommandKind::Read);
+    assert_eq!(interface.commands[0].cost, CommandCost::Instant);
+    assert_eq!(interface.commands[0].params, None);
+    assert_eq!(interface.commands[1].kind, CommandKind::Write);
+    assert!(interface.commands[1].kind.changes_something());
+    assert!(interface.commands[1].params.is_some());
+}
+
+#[test]
+fn a_command_outcome_says_what_it_did() {
+    let done = CommandOutcome::ok(serde_json::json!({
+        "summary": "dry-mass is now 12.5 kg",
+        "data": { "revision": 4 }
+    }));
+    assert!(done.ok);
+    assert!(!done.stale);
+    assert_eq!(done.summary(), Some("dry-mass is now 12.5 kg"));
+
+    // A mutating command that could not republish admits it rather than lying.
+    let stale = CommandOutcome::ok_stale(serde_json::json!({ "summary": "moved" }));
+    assert!(stale.ok && stale.stale);
+
+    // A refusal that names the alternatives is one the agent can recover from.
+    let refused = CommandOutcome::failed_with(
+        "no parameter called \"dry-mass\"",
+        vec!["dry_mass".into(), "propellant_mass".into()],
+    );
+    assert!(!refused.ok);
+    assert_eq!(refused.summary(), Some("no parameter called \"dry-mass\""));
+    assert_eq!(refused.valid.as_deref().map(|v| v.len()), Some(2));
 }
 
 #[test]

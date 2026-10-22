@@ -113,7 +113,7 @@ The declaration is your app's **Node Library** — every element you could expos
 described well enough for a person to pick between them.
 
 ```rust
-use apro_client::{AppInterface, ConsumeDecl, Mode, PublishDecl, Status, TypeId};
+use apro_client::{AppInterface, CommandDecl, ConsumeDecl, Mode, PublishDecl, Status, TypeId};
 
 let mass = TypeId::parse("apro-cad/mass-properties-si-v1")?;
 let mesh = TypeId::parse("apro-cad/mesh-stl-v1")?;
@@ -136,6 +136,11 @@ let interface = AppInterface {
     consumes: vec![ConsumeDecl::from(TypeId::parse("burn-geometry-modeler/grain-geometry-v1")?)
         .with_mode(Mode::Pinned)
         .with_label("Grain geometry")],
+    // Optional: verbs the hub may ask you to perform at runtime. See step 5.
+    commands: vec![CommandDecl::new(
+        "get-state",
+        "Read the vehicle document as it stands",
+    )],
 };
 
 client.declare_interface(&interface)?;
@@ -221,6 +226,57 @@ client.register_edge(&EdgeRequest {
 silently alter your input. Use `Mode::Tracking` when you genuinely want to
 follow the head, and `Mode::Compatible` with `min_revision_number` when you only
 require a floor.
+
+### 5. Offer commands (optional)
+
+Publishing says what your app computed. A **command** lets something else ask
+your app to act: set a parameter, run a solve, add a component. Declare them in
+the same interface, and the hub can offer them to a person or to the agent.
+
+```rust
+use apro_client::{CommandDecl, CommandKind};
+
+let set_parameter = CommandDecl::new(
+    "set-parameter",
+    "Set one vehicle parameter by name, for example dry-mass",
+)
+.writing()
+.with_params(serde_json::json!({
+    "type": "object",
+    "properties": {
+        "name":  { "type": "string" },
+        "value": { "type": "number" }
+    },
+    "required": ["name", "value"],
+    "additionalProperties": false
+}));
+```
+
+Serve them from one loop on the thread that owns your document:
+
+```rust
+while running {
+    let Some(call) = client.claim_command(Duration::from_secs(25))? else {
+        continue;                       // nothing queued, ask again
+    };
+    let outcome = match call.command.as_str() {
+        "set-parameter" => handle_set_parameter(&call.args),
+        other => CommandOutcome::failed(format!("unknown command \"{other}\"")),
+    };
+    client.resolve_command(&call.call_id, &outcome)?;
+}
+```
+
+Three rules, and the third is the one that keeps the canvas honest:
+
+1. `id` is permanent. Add verbs; never rename one.
+2. `summary` is prompt text. It is how the model decides that this is the verb it wants.
+3. A command that changes the document republishes what it publishes **before**
+   answering `ok`, or answers `CommandOutcome::ok_stale(..)`. Otherwise the graph
+   keeps showing revision 3 while the app is already at revision 4.
+
+The full contract, including why commands do not travel on the artifact bus, is
+`docs/APP_TOOLING.md` in the APRO Works repository.
 
 ---
 

@@ -53,10 +53,10 @@ use serde::{Deserialize, Serialize};
 /// `Payload`, `HealthInfo` and `Result` are defined in this crate rather than in
 /// `apro-types`, so they are not listed here.
 pub use apro_types::{
-    AccessRecord, AppInterface, ArtifactFilter, ArtifactSummary, ConsumeDecl, DeclaredType,
-    EdgeFilter, EdgeRequest, EdgeSummary, Encoding, EventRecord, Mode, PublishDecl,
-    RevisionHandle, RevisionSummary, Selector, Status, StoreStats, SubscriptionRequest,
-    SubscriptionSummary, TypeError, TypeId,
+    AccessRecord, AppInterface, ArtifactFilter, ArtifactSummary, CommandCall, CommandCost,
+    CommandDecl, CommandKind, CommandOutcome, ConsumeDecl, DeclaredType, EdgeFilter, EdgeRequest,
+    EdgeSummary, Encoding, EventRecord, Mode, PublishDecl, RevisionHandle, RevisionSummary,
+    Selector, Status, StoreStats, SubscriptionRequest, SubscriptionSummary, TypeError, TypeId,
 };
 
 /// The whole vocabulary, for callers that prefer to qualify it (`apro_types::Foo`).
@@ -292,6 +292,23 @@ pub trait AproStoreClient {
 
     /// The read log. Deliberately separate from the change feed.
     fn access_log(&self, since: i64) -> Result<Vec<AccessRecord>>;
+
+    // -- commands (docs/APP_TOOLING.md) --------------------------------------
+
+    /// The command table this app declared at startup.
+    ///
+    /// Declaring is part of [`AproStoreClient::declare_interface`]; this only reads back
+    /// what the store accepted, which is how the hub builds the agent's digest.
+    fn commands(&self, app: &str) -> Result<Vec<CommandDecl>>;
+
+    /// Long-poll for the next call addressed to this app.
+    ///
+    /// `Ok(None)` means the queue stayed empty for `wait`. Call it in a loop from the
+    /// app's runtime thread; never poll it in a tight loop.
+    fn claim_command(&self, wait: Duration) -> Result<Option<CommandCall>>;
+
+    /// Answer a claimed call. Call it on every path, including failure.
+    fn resolve_command(&self, call_id: &str, outcome: &CommandOutcome) -> Result<()>;
 }
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
@@ -774,6 +791,57 @@ impl AproStoreClient for HttpStoreClient {
             .send()
             .map_err(|err| ClientError::Transport(err.to_string()))?;
         Self::decode(response)
+    }
+
+    fn commands(&self, app: &str) -> Result<Vec<CommandDecl>> {
+        let response = self
+            .request(reqwest::Method::GET, "/v1/commands")
+            .query(&[("app", app)])
+            .send()
+            .map_err(|err| ClientError::Transport(err.to_string()))?;
+        Self::decode(response)
+    }
+
+    fn claim_command(&self, wait: Duration) -> Result<Option<CommandCall>> {
+        let wait_ms = wait.as_millis().min(30_000) as u64;
+        let response = self
+            .request(reqwest::Method::POST, "/v1/commands/claim")
+            .json(&serde_json::json!({ "wait_ms": wait_ms }))
+            .send()
+            .map_err(|err| ClientError::Transport(err.to_string()))?;
+
+        // An empty queue is a 204, not a failure: it is the normal idle answer.
+        if response.status().as_u16() == 204 {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(decode_error(response));
+        }
+        if response.status().as_u16() == 200 {
+            match response.json::<serde_json::Value>() {
+                Ok(value) if value.get("call").is_some_and(|call| !call.is_null()) => {
+                    let call = serde_json::from_value(value["call"].clone())
+                        .map_err(|err| ClientError::Transport(err.to_string()))?;
+                    return Ok(Some(call));
+                }
+                Ok(_) => return Ok(None),
+                Err(err) => return Err(ClientError::Transport(err.to_string())),
+            }
+        }
+        Ok(None)
+    }
+
+    fn resolve_command(&self, call_id: &str, outcome: &CommandOutcome) -> Result<()> {
+        let response = self
+            .request(
+                reqwest::Method::POST,
+                &format!("/v1/commands/{call_id}/resolve"),
+            )
+            .json(outcome)
+            .send()
+            .map_err(|err| ClientError::Transport(err.to_string()))?;
+        let _: serde_json::Value = Self::decode(response)?;
+        Ok(())
     }
 }
 

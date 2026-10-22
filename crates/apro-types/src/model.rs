@@ -328,17 +328,12 @@ fn default_enabled() -> bool {
 /// but the canvas must not let a wire be drawn onto a `planned` element — nothing
 /// would ever be written to it. `Status::Live` is the default so a declaration that
 /// says nothing about status is treated as real.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
+    #[default]
     Live,
     Planned,
-}
-
-impl Default for Status {
-    fn default() -> Self {
-        Status::Live
-    }
 }
 
 impl Status {
@@ -544,6 +539,13 @@ pub struct AppInterface {
     pub publishes: Vec<PublishDecl>,
     #[serde(default)]
     pub consumes: Vec<ConsumeDecl>,
+    /// Verbs the app can be asked to perform at runtime (docs/APP_TOOLING.md).
+    ///
+    /// Separate from `publishes`/`consumes` on purpose: a command is a request with a
+    /// lifetime, not a fact with a revision number, and routing one through the
+    /// artifact bus would light up wires for work that has nothing to do with the data.
+    #[serde(default)]
+    pub commands: Vec<CommandDecl>,
 }
 
 impl AppInterface {
@@ -552,6 +554,7 @@ impl AppInterface {
             app: app.into(),
             publishes: Vec::new(),
             consumes: Vec::new(),
+            commands: Vec::new(),
         }
     }
 
@@ -562,6 +565,11 @@ impl AppInterface {
 
     pub fn consuming(mut self, decl: impl Into<ConsumeDecl>) -> Self {
         self.consumes.push(decl.into());
+        self
+    }
+
+    pub fn declaring(mut self, decl: impl Into<CommandDecl>) -> Self {
+        self.commands.push(decl.into());
         self
     }
 
@@ -581,6 +589,179 @@ impl AppInterface {
             .filter(|c| c.status.is_live())
             .map(|c| &c.type_id)
             .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Commands (docs/APP_TOOLING.md)
+// ---------------------------------------------------------------------------
+
+/// One verb an app can be asked to perform while it is running.
+///
+/// A command is a request with a lifetime, not a fact with a revision number, which is
+/// why it lives here rather than on the artifact bus. `id` is permanent: adding a verb is
+/// free, renaming one breaks every transcript that ever mentioned it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandDecl {
+    pub id: String,
+    /// One line of prompt text. This is what the model reads to choose the verb.
+    pub summary: String,
+    #[serde(default)]
+    pub kind: CommandKind,
+    #[serde(default)]
+    pub cost: CommandCost,
+    /// Flat JSON Schema for the argument object. Absent means "takes no arguments".
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+}
+
+impl CommandDecl {
+    pub fn new(id: impl Into<String>, summary: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            summary: summary.into(),
+            kind: CommandKind::Read,
+            cost: CommandCost::Instant,
+            params: None,
+        }
+    }
+
+    pub fn writing(mut self) -> Self {
+        self.kind = CommandKind::Write;
+        self
+    }
+
+    pub fn destructive(mut self) -> Self {
+        self.kind = CommandKind::Destructive;
+        self
+    }
+
+    /// Answers with a handle instead of a result; the work finishes later.
+    pub fn as_job(mut self) -> Self {
+        self.cost = CommandCost::Job;
+        self
+    }
+
+    pub fn with_params(mut self, params: serde_json::Value) -> Self {
+        self.params = Some(params);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandKind {
+    #[default]
+    Read,
+    Write,
+    Destructive,
+}
+
+impl CommandKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommandKind::Read => "read",
+            CommandKind::Write => "write",
+            CommandKind::Destructive => "destructive",
+        }
+    }
+
+    /// True for anything a planning turn or a viewer must not be offered.
+    pub fn changes_something(self) -> bool {
+        !matches!(self, CommandKind::Read)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandCost {
+    /// Answers inside the step that asked.
+    #[default]
+    Instant,
+    /// Returns a handle; the app resolves it later.
+    Job,
+}
+
+/// A queued request for one app to run one command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandCall {
+    pub call_id: String,
+    pub app: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: serde_json::Value,
+    /// `agent`, `human` or `system`. Free text so a future caller needs no migration.
+    #[serde(default)]
+    pub requested_by: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    pub created_at: Millis,
+}
+
+/// What the app answered.
+///
+/// `stale` is the whole contract: a mutating command either republishes what it publishes
+/// before answering `ok`, or admits that the graph has not caught up yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandOutcome {
+    pub ok: bool,
+    /// `{"summary": "…", "data": {…}}`. The summary is what the model reads first.
+    #[serde(default)]
+    pub result: Option<serde_json::Value>,
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Alternatives to offer when a name did not match, so one refusal is enough.
+    #[serde(default)]
+    pub valid: Option<Vec<String>>,
+    #[serde(default)]
+    pub stale: bool,
+}
+
+impl CommandOutcome {
+    pub fn ok(result: serde_json::Value) -> Self {
+        Self {
+            ok: true,
+            result: Some(result),
+            error: None,
+            valid: None,
+            stale: false,
+        }
+    }
+
+    /// The app changed something but could not republish it yet.
+    pub fn ok_stale(result: serde_json::Value) -> Self {
+        Self {
+            stale: true,
+            ..Self::ok(result)
+        }
+    }
+
+    pub fn failed(error: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            result: None,
+            error: Some(error.into()),
+            valid: None,
+            stale: false,
+        }
+    }
+
+    pub fn failed_with(error: impl Into<String>, valid: Vec<String>) -> Self {
+        Self {
+            valid: Some(valid),
+            ..Self::failed(error)
+        }
+    }
+
+    /// One line for the model: the summary if there is one, else the error.
+    pub fn summary(&self) -> Option<&str> {
+        if let Some(error) = self.error.as_deref() {
+            return Some(error);
+        }
+        self.result
+            .as_ref()
+            .and_then(|value| value.get("summary"))
+            .and_then(|value| value.as_str())
     }
 }
 
